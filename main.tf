@@ -1,3 +1,5 @@
+
+# Create EC2 instance
 # Create EC2 instance
 resource "aws_instance" "main" {
     ami = local.ami_id
@@ -13,7 +15,7 @@ resource "aws_instance" "main" {
     )
 }
 
-# Connect to instance using remote-exec provisioner through terraform_data
+
 resource "terraform_data" "main" {
   triggers_replace = [
     aws_instance.main.id
@@ -26,7 +28,6 @@ resource "terraform_data" "main" {
     host     = aws_instance.main.private_ip
   }
 
-  # terraform copies this file to bootstrap server
   provisioner "file" {
     source = "bootstrap.sh"
     destination = "/tmp/bootstrap.sh"
@@ -40,15 +41,12 @@ resource "terraform_data" "main" {
   }
 }
 
-
-#stop the instance -> Control its power state explicitly
 resource "aws_ec2_instance_state" "main" {
   instance_id = aws_instance.main.id
   state       = "stopped"
   depends_on = [terraform_data.main]
 }
 
-# extracting the AMI, after stopping the instance
 resource "aws_ami_from_instance" "main" {
   name               = "${local.common_name_suffix}-${var.component}-ami"
   source_instance_id = aws_instance.main.id
@@ -60,7 +58,6 @@ resource "aws_ami_from_instance" "main" {
         }
   )
 }
-
 
 resource "aws_lb_target_group" "main" {
   name     = "${local.common_name_suffix}-${var.component}"
@@ -127,7 +124,6 @@ resource "aws_launch_template" "main" {
 
 }
 
-
 resource "aws_autoscaling_group" "main" {
   name                      = "${local.common_name_suffix}-${var.component}"
   max_size                  = 10
@@ -169,4 +165,45 @@ resource "aws_autoscaling_group" "main" {
     delete = "15m"
   }
 
+}
+
+resource "aws_autoscaling_policy" "main" {
+  autoscaling_group_name = aws_autoscaling_group.main.name
+  name                   = "${local.common_name_suffix}-${var.component}"
+  policy_type            = "TargetTrackingScaling"
+
+  target_tracking_configuration {
+    predefined_metric_specification {
+      predefined_metric_type = "ASGAverageCPUUtilization"
+    }
+
+    target_value = 75.0
+  }
+}
+
+resource "aws_lb_listener_rule" "main" {
+  listener_arn = local.listener_arn
+  priority     = var.rule_priority
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.main.arn
+  }
+
+  condition {
+    host_header {
+      values = [local.host_context]
+    }
+  }
+}
+
+resource "terraform_data" "main_local" {
+  triggers_replace = [
+    aws_instance.main.id
+  ]
+  
+  depends_on = [aws_autoscaling_policy.main]
+  provisioner "local-exec" {
+    command = "aws ec2 terminate-instances --instance-ids ${aws_instance.main.id}"
+  }
 }
